@@ -4726,7 +4726,11 @@ int fstReaderInit(struct fstReaderContext *xc)
             }
 
             if (!xc->contains_geom_section) {
-                fstReaderProcessHier(xc, NULL); /* recreate signal_lens/signal_typs info */
+                /* recreate signal_lens/signal_typs info */
+                if (!fstReaderProcessHier(xc, NULL) && xc->maxhandle) {
+                    hdr_seen = 0; /* no hierarchy for the handles the header
+                                     announces, the context would be unusable */
+                }
             }
         }
     }
