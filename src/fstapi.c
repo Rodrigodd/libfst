@@ -4772,11 +4772,10 @@ fstReaderContext *fstReaderOpen(const char *nam)
         xc->filename = strdup(nam);
         rc = fstReaderInit(xc);
 
-        if ((rc) && (xc->vc_section_count) && (xc->maxhandle) &&
-            ((xc->fh) || (xc->contains_hier_section || (xc->contains_hier_section_lz4)))) {
+        if (rc) {
             /* more init */
             xc->do_rewind = 1;
-        } else if (!rc) {
+        } else {
             fstReaderClose(xc);
             xc = NULL;
         }
