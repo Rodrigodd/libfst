@@ -3095,6 +3095,12 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *xc,
             fstWriterCreateMmaps(xc);
         }
 
+        if (FST_UNLIKELY(xc->is_initial_time) && (!xc->size_limit_locked)) {
+            /* the first time change resets the pending value change buffer, so
+               emitting into it beforehand would lose the value */
+            fstWriterEmitTimeChange(xc, 0);
+        }
+
         handle--; /* move starting at 1 index to starting at 0 */
         vm4ip = &(xc->valpos_mem[4 * handle]);
 
