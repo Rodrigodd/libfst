@@ -1,6 +1,12 @@
 libfst_tests = [
     'write_and_read',
     'empty_file',
+    'empty_section',
+    'flush_context',
+    'no_value_change_section',
+    'reader_truncated_file',
+    'value_before_first_time_change',
+    'varlen_before_first_time_change',
 ]
 
 foreach test : libfst_tests
