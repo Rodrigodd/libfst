@@ -1214,11 +1214,13 @@ static void fstWriterEmitSectionHeader(fstWriterContext *xc)
 /*
  * only to be called directly by fst code...otherwise must
  * be synced up with time changes
+ *
+ * returns nonzero when a section was written
  */
 #ifdef FST_WRITER_PARALLEL
-static void fstWriterFlushContextPrivate2(fstWriterContext *xc)
+static int fstWriterFlushContextPrivate2(fstWriterContext *xc)
 #else
-static void fstWriterFlushContextPrivate(fstWriterContext *xc)
+static int fstWriterFlushContextPrivate(fstWriterContext *xc)
 #endif
 {
 #ifdef FST_DEBUG
@@ -1255,7 +1257,7 @@ static void fstWriterFlushContextPrivate(fstWriterContext *xc)
 #endif
 
     if ((xc->vchg_siz <= 1) || (xc->already_in_flush))
-        return;
+        return (0);
     xc->already_in_flush = 1; /* should really do this with a semaphore */
 
     xc->section_header_only = 0;
@@ -1729,6 +1731,8 @@ static void fstWriterFlushContextPrivate(fstWriterContext *xc)
     fflush(xc->handle);
 
     xc->already_in_flush = 0;
+
+    return (1);
 }
 
 #ifdef FST_WRITER_PARALLEL
@@ -1755,12 +1759,17 @@ static void *fstWriterFlushContextPrivate1(void *ctx)
     return (NULL);
 }
 
-static void fstWriterFlushContextPrivate(fstWriterContext *xc)
+static int fstWriterFlushContextPrivate(fstWriterContext *xc)
 {
     if (xc->parallel_enabled) {
-        struct fstWriterContext *xc2 =
-            (struct fstWriterContext *)malloc(sizeof(struct fstWriterContext));
+        struct fstWriterContext *xc2;
         unsigned int i;
+
+        if ((xc->vchg_siz <= 1) || (xc->already_in_flush)) {
+            return (0); /* the thread would have nothing to write */
+        }
+
+        xc2 = (struct fstWriterContext *)malloc(sizeof(struct fstWriterContext));
 
         pthread_mutex_lock(&xc->mutex);
         pthread_mutex_unlock(&xc->mutex);
@@ -1814,6 +1823,8 @@ static void fstWriterFlushContextPrivate(fstWriterContext *xc)
         pthread_mutex_unlock(&xc->mutex);
 
         pthread_create(&xc->thread, &xc->thread_attr, fstWriterFlushContextPrivate1, xc2);
+
+        return (1);
     } else {
         if (xc->parallel_was_enabled) /* conservatively block */
         {
@@ -1822,7 +1833,8 @@ static void fstWriterFlushContextPrivate(fstWriterContext *xc)
         }
 
         xc->xc_parent = xc;
-        fstWriterFlushContextPrivate2(xc);
+
+        return (fstWriterFlushContextPrivate2(xc));
     }
 }
 #endif
@@ -3132,9 +3144,12 @@ void fstWriterEmitTimeChange(fstWriterContext *xc, uint64_t tim)
         } else {
             if (fstWriterGetFlushContextPendingInternal(xc)) {
                 xc->flush_context_pending = 0;
-                fstWriterFlushContextPrivate(xc);
-                xc->tchn_cnt++;
-                fstWriterVarint(xc->tchn_handle, xc->curtime);
+                /* seeding the time chain below is only correct when a new
+                   section was started */
+                if (fstWriterFlushContextPrivate(xc)) {
+                    xc->tchn_cnt++;
+                    fstWriterVarint(xc->tchn_handle, xc->curtime);
+                }
             }
         }
 
