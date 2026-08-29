@@ -1181,6 +1181,7 @@ static void fstWriterEmitSectionHeader(fstWriterContext *xc)
             xc->xc_parent->section_start = xc->section_start;
 #endif
         xc->section_header_only = 1; /* indicates truncate might be needed */
+        xc->section_header_truncpos = xc->section_start - 1; /* position of the FST_BL_SKIP tag */
         fstWriterUint64(xc->handle, 0); /* placeholder = section length */
         fstWriterUint64(xc->handle,
                         xc->is_initial_time ? xc->firsttime
@@ -1869,40 +1870,45 @@ void fstWriterClose(fstWriterContext *xc)
 
         xc->already_in_close = 1; /* never need to zero this out as it is freed at bottom */
 
-        if (xc->section_header_only && xc->section_header_truncpos && (xc->vchg_siz <= 1) &&
-            (!xc->is_initial_time)) {
+        xc->skip_writing_section_hdr = 1;
+        if (!xc->size_limit_locked) {
+            if (FST_UNLIKELY(xc->is_initial_time)) /* simulation time never advanced so mock up
+                                                      the changes as time zero ones */
+            {
+                fstHandle dupe_idx;
+
+                fstWriterEmitTimeChange(xc, 0); /* emit some time change just to have one */
+                for (dupe_idx = 0; dupe_idx < xc->maxhandle; dupe_idx++) /* now clone the values */
+                {
+                    fstWriterEmitValueChange(xc,
+                                             dupe_idx + 1,
+                                             xc->curval_mem + xc->valpos_mem[4 * dupe_idx]);
+                }
+            }
+            fstWriterFlushContextPrivate(xc);
+#ifdef FST_WRITER_PARALLEL
+            pthread_mutex_lock(&xc->mutex);
+            pthread_mutex_unlock(&xc->mutex);
+
+            while (xc->in_pthread) {
+                pthread_mutex_lock(&xc->mutex);
+                pthread_mutex_unlock(&xc->mutex);
+            };
+#endif
+        }
+
+        if (xc->section_header_only && xc->section_header_truncpos && (xc->vchg_siz <= 1)) {
+            /* the flush declined to finalize the section, so its header is
+               still tagged FST_BL_SKIP with a length of zero: truncate it away
+               rather than leave a block no reader can step over.  The fflush()
+               matters, the header may still be buffered and would be written
+               out again after the truncation. */
+            fflush(xc->handle);
             fstFtruncate(fileno(xc->handle), xc->section_header_truncpos);
             fstWriterFseeko(xc, xc->handle, xc->section_header_truncpos, SEEK_SET);
             xc->section_header_only = 0;
-        } else {
-            xc->skip_writing_section_hdr = 1;
-            if (!xc->size_limit_locked) {
-                if (FST_UNLIKELY(xc->is_initial_time)) /* simulation time never advanced so mock up
-                                                          the changes as time zero ones */
-                {
-                    fstHandle dupe_idx;
-
-                    fstWriterEmitTimeChange(xc, 0); /* emit some time change just to have one */
-                    for (dupe_idx = 0; dupe_idx < xc->maxhandle;
-                         dupe_idx++) /* now clone the values */
-                    {
-                        fstWriterEmitValueChange(xc,
-                                                 dupe_idx + 1,
-                                                 xc->curval_mem + xc->valpos_mem[4 * dupe_idx]);
-                    }
-                }
-                fstWriterFlushContextPrivate(xc);
-#ifdef FST_WRITER_PARALLEL
-                pthread_mutex_lock(&xc->mutex);
-                pthread_mutex_unlock(&xc->mutex);
-
-                while (xc->in_pthread) {
-                    pthread_mutex_lock(&xc->mutex);
-                    pthread_mutex_unlock(&xc->mutex);
-                };
-#endif
-            }
         }
+
         fstDestroyMmaps(xc, 1);
         if (xc->outval_mem) {
             free(xc->outval_mem);
