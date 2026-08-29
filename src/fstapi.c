@@ -2859,6 +2859,13 @@ void fstWriterEmitValueChange(fstWriterContext *xc, fstHandle handle, const void
             fstWriterCreateMmaps(xc);
         }
 
+        if (FST_UNLIKELY(xc->is_initial_time) && (!xc->size_limit_locked)) {
+            /* a value change before any time change would only reach the frame,
+               which a reader skips when the section begins at its first time
+               table entry: start the time table at zero instead */
+            fstWriterEmitTimeChange(xc, 0);
+        }
+
         handle--; /* move starting at 1 index to starting at 0 */
         vm4ip = &(xc->valpos_mem[4 * handle]);
 
