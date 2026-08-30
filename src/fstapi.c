@@ -3011,7 +3011,7 @@ void fstWriterEmitValueChangeVec32(fstWriterContext *xc,
             }
         }
         s = xc->outval_mem;
-        {
+        if (br) {
             w = bq;
             v = val[w];
             for (i = 0; i < br; ++i) {
@@ -3056,7 +3056,7 @@ void fstWriterEmitValueChangeVec64(fstWriterContext *xc,
             }
         }
         s = xc->outval_mem;
-        {
+        if (br) {
             w = bq;
             v = val[w];
             for (i = 0; i < br; ++i) {
