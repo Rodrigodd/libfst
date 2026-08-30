@@ -707,7 +707,6 @@ struct fstWriterContext
     fstHandle numsigs;
     uint32_t maxvalpos;
 
-    unsigned vc_emitted : 1;
     unsigned is_initial_time : 1;
     unsigned fourpack : 1;
     unsigned fastpack : 1;
@@ -2855,7 +2854,6 @@ void fstWriterEmitValueChange(fstWriterContext *xc, fstHandle handle, const void
         uint32_t *vm4ip;
 
         if (FST_UNLIKELY(!xc->valpos_mem)) {
-            xc->vc_emitted = 1;
             fstWriterCreateMmaps(xc);
         }
 
@@ -3091,7 +3089,6 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *xc,
         uint32_t *vm4ip;
 
         if (FST_UNLIKELY(!xc->valpos_mem)) {
-            xc->vc_emitted = 1;
             fstWriterCreateMmaps(xc);
         }
 
@@ -3150,7 +3147,7 @@ void fstWriterEmitTimeChange(fstWriterContext *xc, uint64_t tim)
 
             skip = 1;
 
-            xc->firsttime = (xc->vc_emitted) ? 0 : tim;
+            xc->firsttime = tim;
             xc->curtime = 0;
             xc->vchg_mem[0] = '!';
             xc->vchg_siz = 1;
