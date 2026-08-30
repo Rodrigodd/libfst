@@ -15,6 +15,10 @@ libfst_tests = [
     'reader_iter_blocks',
     'writer_misc_api',
     'reader_value_at_time',
+    'wide_vector_value_change',
+    'word_aligned_vector_value_change',
+    'process_hier_fac_mask',
+    'real_value_from_frame',
 ]
 
 libfst_test_exes = []
