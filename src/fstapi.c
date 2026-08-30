@@ -3043,7 +3043,7 @@ void fstWriterEmitValueChangeVec64(fstWriterContext *xc,
         int br = bits & 63;
         int i;
         int w;
-        uint32_t v;
+        uint64_t v;
         unsigned char *s;
         if (FST_UNLIKELY(bits > xc->outval_alloc_siz)) {
             xc->outval_alloc_siz = bits * 2 + 1;
