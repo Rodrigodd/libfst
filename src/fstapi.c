@@ -5991,7 +5991,7 @@ static char *fstExtractRvatDataFromFrame(fstReaderContext *xc, fstHandle facidx,
                 }
             }
 
-            snprintf((char *)buf, 32, "%.16g", d); /* this will write 18 bytes */
+            snprintf((char *)buf, 32, "r%.16g", d); /* this will write 19 bytes */
         }
     }
 
