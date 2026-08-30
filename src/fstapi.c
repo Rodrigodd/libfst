@@ -1718,7 +1718,6 @@ static int fstWriterFlushContextPrivate(fstWriterContext *xc)
         if (endpos >= ((fst_off_t)xc->dump_size_limit)) {
             xc2->skip_writing_section_hdr = 1;
             xc2->size_limit_locked = 1;
-            xc2->is_initial_time = 1; /* to trick emit value and emit time change */
 #ifdef FST_DEBUG
             fprintf(stderr, FST_APIMESS "<< dump file size limit reached, stopping dumping >>\n");
 #endif
@@ -2522,7 +2521,8 @@ static int fstWriterGetFlushContextPendingInternal(fstWriterContext *xc)
 
 int fstWriterGetFlushContextPending(fstWriterContext *xc)
 {
-    return xc && !xc->is_initial_time && fstWriterGetFlushContextPendingInternal(xc);
+    return xc && !xc->is_initial_time && !xc->size_limit_locked &&
+           fstWriterGetFlushContextPendingInternal(xc);
 }
 
 /*
@@ -2857,7 +2857,7 @@ void fstWriterEmitValueChange(fstWriterContext *xc, fstHandle handle, const void
             fstWriterCreateMmaps(xc);
         }
 
-        if (FST_UNLIKELY(xc->is_initial_time) && (!xc->size_limit_locked)) {
+        if (FST_UNLIKELY(xc->is_initial_time)) {
             /* a value change before any time change would only reach the frame,
                which a reader skips when the section begins at its first time
                table entry: start the time table at zero instead */
@@ -2871,7 +2871,7 @@ void fstWriterEmitValueChange(fstWriterContext *xc, fstHandle handle, const void
         if (FST_LIKELY(len)) /* len of zero = variable length, use
                                 fstWriterEmitVariableLengthValueChange */
         {
-            if (FST_LIKELY(!xc->is_initial_time)) {
+            if (FST_LIKELY(!xc->size_limit_locked)) {
                 fpos = xc->vchg_siz;
 
                 if (FST_UNLIKELY((fpos + len + 10) > xc->vchg_alloc_siz)) {
@@ -3092,7 +3092,7 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *xc,
             fstWriterCreateMmaps(xc);
         }
 
-        if (FST_UNLIKELY(xc->is_initial_time) && (!xc->size_limit_locked)) {
+        if (FST_UNLIKELY(xc->is_initial_time)) {
             /* the first time change resets the pending value change buffer, so
                emitting into it beforehand would lose the value */
             fstWriterEmitTimeChange(xc, 0);
@@ -3135,12 +3135,11 @@ void fstWriterEmitTimeChange(fstWriterContext *xc, uint64_t tim)
     unsigned int i;
     int skip = 0;
     if (xc) {
-        if (FST_UNLIKELY(xc->is_initial_time)) {
-            if (xc->size_limit_locked) /* this resets xc->is_initial_time to one */
-            {
-                return;
-            }
+        if (FST_UNLIKELY(xc->size_limit_locked)) {
+            return; /* the dump size limit was reached, nothing more is written */
+        }
 
+        if (FST_UNLIKELY(xc->is_initial_time)) {
             if (!xc->valpos_mem) {
                 fstWriterCreateMmaps(xc);
             }
