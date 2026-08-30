@@ -9,12 +9,16 @@ libfst_tests = [
     'varlen_before_first_time_change',
 ]
 
+libfst_test_exes = []
+
 foreach test : libfst_tests
     exe = executable(
         'test-' + test,
         test + '.c',
         dependencies: [libfst_dep, glib_dep],
     )
+
+    libfst_test_exes += exe
 
     test(test, exe)
 endforeach

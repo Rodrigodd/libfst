@@ -56,5 +56,60 @@ config_inc = include_directories('.')
 
 add_project_arguments('-DFST_INCLUDE_CONFIG', language: 'c')
 
+# Clang source-based coverage
+#
+# With -Dllvm_coverage=true the tests write raw profiles into the build
+# directory and the `coverage-json` target turns them into an llvm-cov JSON
+# report:
+#
+#     CC=clang meson setup build-cov -Dllvm_coverage=true
+#     meson test -C build-cov
+#     ninja -C build-cov coverage-json
+
+llvm_coverage = get_option('llvm_coverage')
+
+if llvm_coverage
+    if cc.get_id() != 'clang'
+        error('llvm_coverage requires clang, configure the build directory with CC=clang')
+    endif
+    if get_option('b_coverage')
+        error('llvm_coverage and b_coverage are mutually exclusive')
+    endif
+
+    llvm_profdata = find_program('llvm-profdata')
+    llvm_cov = find_program('llvm-cov')
+    coverage_json_script = find_program('scripts/llvm_coverage_json.py')
+
+    add_project_arguments('-fprofile-instr-generate', '-fcoverage-mapping', language: 'c')
+    add_project_link_arguments('-fprofile-instr-generate', language: 'c')
+
+    profraw_dir = meson.project_build_root() / 'profraw'
+
+    add_test_setup(
+        'coverage',
+        env: {'LLVM_PROFILE_FILE': profraw_dir / '%p-%m.profraw'},
+        is_default: true,
+    )
+endif
+
+
 subdir('src')
 subdir('tests')
+
+if llvm_coverage
+    coverage_objects = [libfst] + libfst_test_exes
+
+    run_target(
+        'coverage-json',
+        command: [
+            coverage_json_script,
+            '--llvm-profdata', llvm_profdata,
+            '--llvm-cov', llvm_cov,
+            '--profraw-dir', profraw_dir,
+            '--output', meson.project_build_root() / 'coverage.json',
+            '--ignore-filename-regex', '^/usr/',
+            coverage_objects,
+        ],
+        depends: coverage_objects,
+    )
+endif

@@ -1,0 +1,6 @@
+option(
+    'llvm_coverage',
+    type: 'boolean',
+    value: false,
+    description: 'Instrument with clang source-based coverage and enable the coverage-json target (requires clang)',
+)
