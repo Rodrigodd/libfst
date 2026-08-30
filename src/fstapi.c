@@ -3088,6 +3088,10 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *xc,
         uint32_t fpos;
         uint32_t *vm4ip;
 
+        if (FST_UNLIKELY(xc->size_limit_locked)) {
+            return; /* the dump size limit was reached, nothing more is written */
+        }
+
         if (FST_UNLIKELY(!xc->valpos_mem)) {
             fstWriterCreateMmaps(xc);
         }
