@@ -4084,6 +4084,8 @@ int fstReaderProcessHier(fstReaderContext *xc, FILE *fv)
     fstHandle maxhandle_scanbuild;
     int cl;
     int unnamed_scope_idx = 0;
+    uint32_t process_mask_len;
+    uint32_t prev_process_mask_len;
 
     if (!xc)
         return (0);
@@ -4194,6 +4196,10 @@ int fstReaderProcessHier(fstReaderContext *xc, FILE *fv)
         if (fv)
             fprintf(fv, "$timescale\n\t%d%ss\n$end\n", time_scale, time_dimension);
     }
+
+    /* the mask is rebuilt below for the handle count found here, its contents
+       belong to the caller and have to survive that */
+    prev_process_mask_len = (xc->maxhandle + 7) / 8;
 
     xc->maxhandle = 0;
     xc->num_alias = 0;
@@ -4438,8 +4444,13 @@ int fstReaderProcessHier(fstReaderContext *xc, FILE *fv)
     xc->signal_typs =
         (unsigned char *)realloc(xc->signal_typs, maxhandle_scanbuild * sizeof(unsigned char));
 
-    free(xc->process_mask);
-    xc->process_mask = (unsigned char *)calloc(1, (maxhandle_scanbuild + 7) / 8);
+    process_mask_len = (maxhandle_scanbuild + 7) / 8;
+    xc->process_mask = (unsigned char *)realloc(xc->process_mask, process_mask_len);
+    if (process_mask_len > prev_process_mask_len) {
+        memset(xc->process_mask + prev_process_mask_len,
+               0,
+               process_mask_len - prev_process_mask_len);
+    }
 
     free(xc->temp_signal_value_buf);
     xc->temp_signal_value_buf = (unsigned char *)malloc(xc->longest_signal_value_len + 1);
