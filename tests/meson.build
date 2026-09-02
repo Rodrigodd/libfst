@@ -20,6 +20,7 @@ libfst_tests = [
     'process_hier_fac_mask',
     'real_value_from_frame',
     'fastlz_pack_value_change',
+    'value_change_handle_zero',
 ]
 
 libfst_test_exes = []

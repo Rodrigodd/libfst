@@ -2849,7 +2849,7 @@ void fstWriterEmitValueChange(fstWriterContext *xc, fstHandle handle, const void
     uint32_t offs;
     int len;
 
-    if (FST_LIKELY((xc) && (handle <= xc->maxhandle))) {
+    if (FST_LIKELY((xc) && (handle) && (handle <= xc->maxhandle))) {
         uint32_t fpos;
         uint32_t *vm4ip;
 
@@ -3084,7 +3084,7 @@ void fstWriterEmitVariableLengthValueChange(fstWriterContext *xc,
 {
     const unsigned char *buf = (const unsigned char *)val;
 
-    if (FST_LIKELY((xc) && (handle <= xc->maxhandle))) {
+    if (FST_LIKELY((xc) && (handle) && (handle <= xc->maxhandle))) {
         uint32_t fpos;
         uint32_t *vm4ip;
 
