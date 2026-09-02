@@ -4,3 +4,10 @@ option(
     value: false,
     description: 'Instrument with clang source-based coverage and enable the coverage-json target (requires clang)',
 )
+
+option(
+    'fuzzing',
+    type: 'boolean',
+    value: false,
+    description: 'Build the libFuzzer targets in fuzz/ (requires clang)',
+)

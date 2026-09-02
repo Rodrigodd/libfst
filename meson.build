@@ -93,8 +93,28 @@ if llvm_coverage
 endif
 
 
+# libFuzzer targets, see fuzz/README.md
+#
+# The library is instrumented with -fsanitize=fuzzer-no-link as well, otherwise
+# libFuzzer only sees the coverage of the target itself and cannot steer.
+
+fuzzing = get_option('fuzzing')
+
+if fuzzing
+    if cc.get_id() != 'clang'
+        error('fuzzing requires clang, configure the build directory with CC=clang')
+    endif
+
+    add_project_arguments('-fsanitize=fuzzer-no-link', language: 'c')
+    add_project_link_arguments('-fsanitize=fuzzer-no-link', language: 'c')
+endif
+
 subdir('src')
 subdir('tests')
+
+if fuzzing
+    subdir('fuzz')
+endif
 
 if llvm_coverage
     coverage_objects = [libfst] + libfst_test_exes
