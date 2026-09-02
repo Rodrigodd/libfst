@@ -98,6 +98,7 @@ struct hrec
     fstHandle handle;
     int is_alias;
     int etab; /* index into etab_presets for an enum table definition, else -1 */
+    int skip_name; /* the record carries an encoded payload rather than text */
     int has_comp;
     char name[96];
     char comp[16];
@@ -116,6 +117,27 @@ static const char *etab_lits_0[] = {"IDLE", "RUN", "DONE"};
 static const char *etab_vals_0[] = {"00", "01", "10"};
 static const char *etab_lits_1[] = {"OFF", "ON"};
 static const char *etab_vals_1[] = {"0", "1"};
+
+/*
+ * Timescale strings whose exponent is unambiguous, measured against
+ * fstReaderGetTimescale().  Strings the parser does not understand are fed in
+ * too, but without asserting what they produce, see FUZZ_QUESTIONS.md.
+ */
+static const struct
+{
+    const char *text;
+    int exponent;
+} timescale_strings[] = {
+    {"1s", 0},      {"100ms", -1},  {"10ms", -2},   {"1ms", -3},   {"100us", -4},
+    {"10us", -5},   {"1us", -6},    {"100ns", -7},  {"10ns", -8},  {"1ns", -9},
+    {"100ps", -10}, {"10ps", -11},  {"1ps", -12},   {"100fs", -13},{"10fs", -14},
+    {"1fs", -15},   {"1as", -18},   {"1zs", -21},   {"ps", -12},   {"ns", -9},
+    {"us", -6},     {"10n", -8},    {"s", 0},
+};
+#define N_TIMESCALE_STRINGS ((int)(sizeof(timescale_strings) / sizeof(timescale_strings[0])))
+
+static const char *const timescale_junk[] = {"xyz", "1e-9s", "", "1", "-", "0z", "999999999999m"};
+#define N_TIMESCALE_JUNK ((int)(sizeof(timescale_junk) / sizeof(timescale_junk[0])))
 
 /* min_valbits equals every value length, so no zero padding is applied */
 static const struct etab_preset etab_presets[] = {
@@ -188,6 +210,9 @@ static uint64_t model_first_time;
 static uint64_t model_cur_time;
 static int time_started;
 static int limit_hit; /* the dump size limit locked the writer at some point */
+
+static uint64_t stem_paths_seen[3]; /* 0 = not emitted yet, else its path index */
+static unsigned int n_stem_paths;
 
 static uint64_t model_var_count;
 static uint64_t model_scope_count;
@@ -369,11 +394,41 @@ static void gen_metadata(uint8_t flags)
     fstWriterSetParallelMode(writer, (flags & 2) ? 1 : 0);
     fstWriterSetRepackOnClose(writer, (flags & 4) ? 1 : 0);
 
-    cfg_timescale = -(int)tape_range(0, 12);
     cfg_timezero = (int64_t)(int16_t)tape_uint(2);
     cfg_filetype = (int)tape_range(FST_FT_MIN, FST_FT_MAX);
 
-    fstWriterSetTimescale(writer, cfg_timescale);
+    /* run the string parser over something it cannot make sense of first, the
+       call that fixes the timescale for the oracle comes after it */
+    if (flags & 128) {
+        const char *junk = timescale_junk[tape_range(0, N_TIMESCALE_JUNK - 1)];
+
+        fstWriterSetTimescaleFromString(writer, junk);
+        say("fstWriterSetTimescaleFromString(w, \"%s\"); /* result not asserted */\n", junk);
+    }
+
+    if (tape_u8() & 1) {
+        int pick = (int)tape_range(0, N_TIMESCALE_STRINGS - 1);
+
+        cfg_timescale = timescale_strings[pick].exponent;
+        fstWriterSetTimescaleFromString(writer, timescale_strings[pick].text);
+        say("fstWriterSetTimescaleFromString(w, \"%s\");\n", timescale_strings[pick].text);
+    } else {
+        cfg_timescale = -(int)tape_range(0, 12);
+        fstWriterSetTimescale(writer, cfg_timescale);
+    }
+    {
+        /* the value list is emitted as an attribute of its own */
+        struct hrec *h = push_hrec(FST_HT_ATTRBEGIN);
+
+        fstWriterSetValueList(writer, "fuzz");
+        say("fstWriterSetValueList(w, \"fuzz\");\n");
+
+        if (h) {
+            h->typ = FST_AT_MISC;
+            h->subtype = FST_MT_VALUELIST;
+            snprintf(h->name, sizeof(h->name), "fuzz");
+        }
+    }
     fstWriterSetTimezero(writer, cfg_timezero);
     fstWriterSetFileType(writer, (enum fstFileType)cfg_filetype);
     fstWriterSetVersion(writer, version_string);
@@ -384,7 +439,6 @@ static void gen_metadata(uint8_t flags)
                         : ((packtype == 1) ? "FST_WR_PT_FASTLZ" : "FST_WR_PT_LZ4"));
     say("fstWriterSetParallelMode(w, %d);\n", (flags & 2) ? 1 : 0);
     say("fstWriterSetRepackOnClose(w, %d);\n", (flags & 4) ? 1 : 0);
-    say("fstWriterSetTimescale(w, %d);\n", cfg_timescale);
     say("fstWriterSetTimezero(w, %" PRId64 ");\n", cfg_timezero);
     say("fstWriterSetFileType(w, %d);\n", cfg_filetype);
 
@@ -441,7 +495,7 @@ static void gen_hierarchy(void)
         uint8_t op = tape_u8();
         n_cmds++;
 
-        switch (op % 7) {
+        switch (op % 9) {
             case 0: { /* end of the hierarchy phase */
                 if (attr_open) {
                     fstWriterSetAttrEnd(writer);
@@ -636,6 +690,110 @@ static void gen_hierarchy(void)
                 break;
             }
 
+            case 7: { /* source stem, whose path is interned */
+                struct hrec *h;
+                unsigned int line = (unsigned int)tape_range(1, 1000);
+                int istem = tape_u8() & 1;
+                int pick = (int)tape_range(0, 2);
+                static const char *const paths[] = {"top.v", "inner.v", "pkg.sv"};
+                const char *path = paths[pick];
+
+                /* the first use of a path emits a pathname record, later uses
+                   only refer to it */
+                if (!stem_paths_seen[pick]) {
+                    stem_paths_seen[pick] = ++n_stem_paths;
+
+                    h = push_hrec(FST_HT_ATTRBEGIN);
+                    if (h) {
+                        h->typ = FST_AT_MISC;
+                        h->subtype = FST_MT_PATHNAME;
+                        h->arg = stem_paths_seen[pick];
+                        snprintf(h->name, sizeof(h->name), "%s", path);
+                    }
+                }
+
+                h = push_hrec(FST_HT_ATTRBEGIN);
+                if (h) {
+                    h->typ = FST_AT_MISC;
+                    h->subtype = istem ? FST_MT_SOURCEISTEM : FST_MT_SOURCESTEM;
+                    h->arg = line;
+                    h->skip_name = 1; /* a varint encoding of the path index */
+                }
+
+                if (istem) {
+                    fstWriterSetSourceInstantiationStem(writer, path, line, 0);
+                    say("fstWriterSetSourceInstantiationStem(w, \"%s\", %u, 0);\n", path, line);
+                } else {
+                    fstWriterSetSourceStem(writer, path, line, 0);
+                    say("fstWriterSetSourceStem(w, \"%s\", %u, 0);\n", path, line);
+                }
+                break;
+            }
+
+            case 8: { /* variable declared through the language neutral entry point */
+                struct hrec *h;
+                int vd = (int)tape_range(FST_VD_MIN, FST_VD_MAX);
+                int svt = (int)tape_range(FST_SVT_MIN, FST_SVT_MAX);
+                int sdt = (int)tape_range(FST_SDT_MIN, FST_SDT_MAX);
+                uint32_t len;
+                fstHandle handle;
+                char name[16];
+
+                if (n_sigs >= MAX_VARS) {
+                    break;
+                }
+
+                len = tape_range(1, MAX_WIDTH);
+                snprintf(name, sizeof(name), "w%u", n_cmds);
+
+                /* the type string is emitted as a supplemental var attribute
+                   ahead of the variable itself */
+                h = push_hrec(FST_HT_ATTRBEGIN);
+                if (h) {
+                    h->typ = FST_AT_MISC;
+                    h->subtype = FST_MT_SUPVAR;
+                    h->arg = ((uint64_t)svt << FST_SDT_SVT_SHIFT_COUNT) |
+                             (uint64_t)(sdt & FST_SDT_ABS_MAX);
+                    snprintf(h->name, sizeof(h->name), "fuzztype");
+                }
+
+                handle = fstWriterCreateVar2(writer,
+                                             FST_VT_VCD_WIRE,
+                                             (enum fstVarDir)vd,
+                                             len,
+                                             name,
+                                             0,
+                                             "fuzztype",
+                                             (enum fstSupplementalVarType)svt,
+                                             (enum fstSupplementalDataType)sdt);
+                say("fstWriterCreateVar2(w, ..., %u, \"%s\", 0, \"fuzztype\", %d, %d);\n",
+                    len,
+                    name,
+                    svt,
+                    sdt);
+
+                CHECKF(handle == n_sigs + 1,
+                       "fstWriterCreateVar2() returned handle %u, expected %u\n",
+                       (unsigned)handle,
+                       n_sigs + 1);
+
+                sigs[n_sigs].kind = VK_BITS;
+                sigs[n_sigs].width = len;
+                sigs[n_sigs].has_change = 0;
+                n_sigs++;
+                model_var_count++;
+
+                h = push_hrec(FST_HT_VAR);
+                if (h) {
+                    h->typ = FST_VT_VCD_WIRE;
+                    h->direction = vd;
+                    h->length = len;
+                    h->handle = handle;
+                    snprintf(h->name, sizeof(h->name), "%s", name);
+                }
+                break;
+            }
+
             case 5: { /* attribute begin or end */
                 if (attr_open) {
                     fstWriterSetAttrEnd(writer);
@@ -750,6 +908,33 @@ static fstHandle pick_handle(enum var_kind kind)
     return candidates[tape_range(0, n - 1)];
 }
 
+/*
+ * The typed emitters take the value as an array of words, least significant
+ * word first, and emit it as a bit string most significant bit first.  The
+ * array is sized to the width exactly, so that a read past its end is a
+ * sanitizer report rather than a silent success.
+ */
+static void tape_words(uint32_t bits,
+                       unsigned int word_bits,
+                       uint64_t *words,
+                       unsigned char *expect)
+{
+    uint32_t n_words = (bits + word_bits - 1) / word_bits;
+    uint32_t i;
+
+    for (i = 0; i < n_words; i++) {
+        words[i] = (word_bits == 32) ? tape_uint(4) : tape_uint(8);
+    }
+
+    for (i = 0; i < bits; i++) {
+        uint32_t pos = bits - 1 - i; /* bit index counted from the bottom */
+        uint64_t w = words[pos / word_bits];
+
+        expect[i] = (unsigned char)('0' + ((w >> (pos % word_bits)) & 1));
+    }
+    expect[bits] = 0;
+}
+
 static double tape_double(void)
 {
     uint64_t bits = tape_uint(8);
@@ -777,11 +962,31 @@ static void gen_body(void)
         uint8_t op = tape_u8();
         n_cmds++;
 
-        switch (op % 8) {
+        switch (op % 9) {
             case 0:
             case 1: { /* time change */
-                uint64_t delta = tape_range(0, 255);
-                uint64_t t = model_cur_time + delta;
+                uint64_t delta;
+                uint64_t t;
+
+                /* a small step most of the time, and now and then one large
+                   enough to push the time chain varints out to their full
+                   width */
+                switch (tape_range(0, 4)) {
+                    case 0:
+                        delta = 0;
+                        break;
+                    case 1:
+                        delta = tape_uint(4);
+                        break;
+                    case 2:
+                        delta = tape_uint(8) >> 16;
+                        break;
+                    default:
+                        delta = tape_range(1, 255);
+                        break;
+                }
+
+                t = model_cur_time + delta;
                 int locked = writer_locked();
 
                 fstWriterEmitTimeChange(writer, t);
@@ -920,7 +1125,85 @@ static void gen_body(void)
                 break;
             }
 
-            case 6: { /* flush */
+            case 6: { /* value change through one of the typed emitters */
+                fstHandle h = pick_handle(VK_BITS);
+                uint64_t words[MAX_WIDTH / 32 + 2];
+                uint32_t words32[MAX_WIDTH / 32 + 2];
+                unsigned char expect[MAX_WIDTH + 1];
+                uint32_t width;
+                unsigned int i;
+                int which;
+                int locked;
+
+                if (h == 0) {
+                    break;
+                }
+
+                width = sigs[h - 1].width;
+
+                /* fstWriterEmitValueChange32() and ...64() format into a
+                   buffer of their own word size, so they only take a width up
+                   to that */
+                which = (int)tape_range(0, 3);
+                if (which == 0 && width > 32) {
+                    which = 2;
+                }
+                if (which == 1 && width > 64) {
+                    which = 3;
+                }
+
+                tape_words(width, (which == 0 || which == 2) ? 32 : 64, words, expect);
+
+                if (!model_start_time()) {
+                    break;
+                }
+                if (sigs[h - 1].has_change && sigs[h - 1].last_time == model_cur_time) {
+                    break;
+                }
+
+                locked = writer_locked();
+
+                switch (which) {
+                    case 0:
+                        fstWriterEmitValueChange32(writer, h, width, (uint32_t)words[0]);
+                        say("fstWriterEmitValueChange32(w, h%u, %u, ...);%s\n",
+                            (unsigned)h,
+                            width,
+                            locked ? " /* frame only, writer locked */" : "");
+                        break;
+                    case 1:
+                        fstWriterEmitValueChange64(writer, h, width, words[0]);
+                        say("fstWriterEmitValueChange64(w, h%u, %u, ...);%s\n",
+                            (unsigned)h,
+                            width,
+                            locked ? " /* frame only, writer locked */" : "");
+                        break;
+                    case 2:
+                        for (i = 0; i < (width + 31) / 32; i++) {
+                            words32[i] = (uint32_t)words[i];
+                        }
+                        fstWriterEmitValueChangeVec32(writer, h, width, words32);
+                        say("fstWriterEmitValueChangeVec32(w, h%u, %u, ...);%s\n",
+                            (unsigned)h,
+                            width,
+                            locked ? " /* frame only, writer locked */" : "");
+                        break;
+                    default:
+                        fstWriterEmitValueChangeVec64(writer, h, width, words);
+                        say("fstWriterEmitValueChangeVec64(w, h%u, %u, ...);%s\n",
+                            (unsigned)h,
+                            width,
+                            locked ? " /* frame only, writer locked */" : "");
+                        break;
+                }
+
+                if (!locked) {
+                    record_change(h, expect, width, 0.0);
+                }
+                break;
+            }
+
+            case 7: { /* flush */
                 fstWriterFlushContext(writer);
                 say("fstWriterFlushContext(w);\n");
 
@@ -1134,7 +1417,65 @@ static void varlen_cb(void *user,
            time);
 }
 
-static void check_hierarchy(fstReaderContext *reader)
+/*
+ * The reader keeps the scope stack for the caller, it does not walk the
+ * hierarchy itself, so the flat scope is only correct if every scope record is
+ * pushed and every upscope record popped.
+ */
+static char expected_flat[MAX_SCOPE_DEPTH * (sizeof(((struct hrec *)0)->name) + 1)];
+static unsigned int expected_depth;
+static int scope_user_info[MAX_SCOPE_DEPTH];
+
+static void scope_push(fstReaderContext *reader, const char *name)
+{
+    if (expected_depth >= MAX_SCOPE_DEPTH) {
+        return;
+    }
+
+    fstReaderPushScope(reader, name, &scope_user_info[expected_depth]);
+
+    if (expected_flat[0]) {
+        strcat(expected_flat, ".");
+    }
+    strcat(expected_flat, name);
+    expected_depth++;
+
+    CHECKF(strcmp(fstReaderGetCurrentFlatScope(reader), expected_flat) == 0,
+           "flat scope is \"%s\", expected \"%s\"\n",
+           fstReaderGetCurrentFlatScope(reader),
+           expected_flat);
+    CHECKF(fstReaderGetCurrentScopeLen(reader) == (int)strlen(expected_flat),
+           "flat scope length is %d, expected %d\n",
+           fstReaderGetCurrentScopeLen(reader),
+           (int)strlen(expected_flat));
+    CHECK(fstReaderGetCurrentScopeUserInfo(reader) == &scope_user_info[expected_depth - 1]);
+}
+
+static void scope_pop(fstReaderContext *reader)
+{
+    char *dot;
+
+    if (expected_depth == 0) {
+        return;
+    }
+
+    CHECK(fstReaderPopScope(reader) != NULL);
+
+    dot = strrchr(expected_flat, '.');
+    if (dot) {
+        *dot = 0;
+    } else {
+        expected_flat[0] = 0;
+    }
+    expected_depth--;
+
+    CHECKF(strcmp(fstReaderGetCurrentFlatScope(reader), expected_flat) == 0,
+           "flat scope after popping is \"%s\", expected \"%s\"\n",
+           fstReaderGetCurrentFlatScope(reader),
+           expected_flat);
+}
+
+static void check_hierarchy(fstReaderContext *reader, int track_scopes)
 {
     struct fstHier *hier;
     unsigned int i = 0;
@@ -1142,6 +1483,9 @@ static void check_hierarchy(fstReaderContext *reader)
     if (hrecs_dropped) {
         return;
     }
+
+    expected_flat[0] = 0;
+    expected_depth = 0;
 
     while ((hier = fstReaderIterateHier(reader)) != NULL) {
         struct hrec *h;
@@ -1160,6 +1504,9 @@ static void check_hierarchy(fstReaderContext *reader)
 
         switch (h->htyp) {
             case FST_HT_SCOPE:
+                if (track_scopes) {
+                    scope_push(reader, hier->u.scope.name);
+                }
                 CHECKF(hier->u.scope.typ == h->typ,
                        "scope record %u: read scope type %d, wrote %d\n",
                        i,
@@ -1277,12 +1624,18 @@ static void check_hierarchy(fstReaderContext *reader)
                            "\"%s\"\n",
                            i,
                            hier->u.attr.name);
-                } else {
+                } else if (!h->skip_name) {
                     CHECKF(strcmp(hier->u.attr.name, h->name) == 0,
                            "attribute record %u: read name \"%s\", wrote \"%s\"\n",
                            i,
                            hier->u.attr.name,
                            h->name);
+                }
+                break;
+
+            case FST_HT_UPSCOPE:
+                if (track_scopes) {
+                    scope_pop(reader);
                 }
                 break;
 
@@ -1293,17 +1646,65 @@ static void check_hierarchy(fstReaderContext *reader)
         i++;
     }
 
+    if (track_scopes) {
+        /* whatever is left of the stack is discarded in one go */
+        fstReaderResetScope(reader);
+        CHECK(fstReaderGetCurrentFlatScope(reader)[0] == 0);
+        CHECK(fstReaderGetCurrentScopeLen(reader) == 0);
+        CHECK(fstReaderGetCurrentScopeUserInfo(reader) == NULL);
+        CHECK(fstReaderPopScope(reader) == NULL);
+    }
+
     CHECKF(i == n_hrecs,
            "the hierarchy has %u records, wrote %u\n",
            i,
            n_hrecs);
 }
 
+/* compare one fstReaderGetValueFromHandleAtTime() reading against the model */
+static void sample_one(fstReaderContext *reader,
+                       fstHandle handle,
+                       uint64_t tim,
+                       const struct change *expected)
+{
+    char buf[MAX_WIDTH + 64];
+    char *got = fstReaderGetValueFromHandleAtTime(reader, tim, handle, buf);
+
+    CHECKF(got != NULL,
+           "fstReaderGetValueFromHandleAtTime() returned nothing for handle %u at time %" PRIu64
+           ", which has a value from time %" PRIu64 "\n",
+           (unsigned)handle,
+           tim,
+           expected->time);
+
+    if (sigs[handle - 1].kind == VK_REAL) {
+        char expect[64];
+
+        real_to_string(expected->d, expect, sizeof(expect), 1);
+        CHECKF(strcmp(got, expect) == 0,
+               "fstReaderGetValueFromHandleAtTime() for real handle %u at time %" PRIu64
+               ": read \"%s\", wrote \"%s\" at time %" PRIu64 "\n",
+               (unsigned)handle,
+               tim,
+               got,
+               expect,
+               expected->time);
+    } else {
+        CHECKF(strcmp(got, (const char *)expected->val) == 0,
+               "fstReaderGetValueFromHandleAtTime() for handle %u at time %" PRIu64
+               ": read \"%s\", wrote \"%s\" at time %" PRIu64 "\n",
+               (unsigned)handle,
+               tim,
+               got,
+               (const char *)expected->val,
+               expected->time);
+    }
+}
+
 static void check_value_at_time(fstReaderContext *reader)
 {
     unsigned int sampled = 0;
     unsigned int i;
-    char buf[MAX_WIDTH + 64];
 
     /* the times the reader could still have on file */
     uint64_t cutoff = have_cb_time ? last_cb_time : 0;
@@ -1317,9 +1718,10 @@ static void check_value_at_time(fstReaderContext *reader)
         struct sig *s = &sigs[c->handle - 1];
         unsigned int j;
         struct change *last = c;
-        char *got;
 
         if (s->kind == VK_STRING) {
+            char buf[MAX_WIDTH + 64];
+
             /*
              * QUIRK: fstReaderGetValueFromHandleAtTime() has no variable
              * length path and returns NULL for such a handle.
@@ -1342,35 +1744,38 @@ static void check_value_at_time(fstReaderContext *reader)
             }
         }
 
-        got = fstReaderGetValueFromHandleAtTime(reader, c->time, c->handle, buf);
-        CHECKF(got != NULL,
-               "fstReaderGetValueFromHandleAtTime() returned nothing for handle %u at time %" PRIu64
-               ", which has a value change there\n",
-               (unsigned)c->handle,
-               c->time);
-
-        if (s->kind == VK_REAL) {
-            char expect[64];
-
-            real_to_string(last->d, expect, sizeof(expect), 1);
-            CHECKF(strcmp(got, expect) == 0,
-                   "fstReaderGetValueFromHandleAtTime() for real handle %u at time %" PRIu64
-                   ": read \"%s\", wrote \"%s\"\n",
-                   (unsigned)c->handle,
-                   c->time,
-                   got,
-                   expect);
-        } else {
-            CHECKF(strcmp(got, (const char *)last->val) == 0,
-                   "fstReaderGetValueFromHandleAtTime() for handle %u at time %" PRIu64
-                   ": read \"%s\", wrote \"%s\"\n",
-                   (unsigned)c->handle,
-                   c->time,
-                   got,
-                   (const char *)last->val);
-        }
-
+        sample_one(reader, c->handle, c->time, last);
         sampled++;
+
+        /*
+         * Sample the same handle at a later time as well.  Once that time is
+         * in a section the handle has no change in, the value comes out of
+         * that section's frame rather than out of its value change data, which
+         * is a different path through the reader.
+         */
+        for (j = i + 1; j < n_changes && sampled < MAX_RVAT_SAMPLES; j++) {
+            uint64_t later = changes[j].time;
+            struct change *at_later = NULL;
+            unsigned int k;
+
+            if (later <= c->time || later > cutoff) {
+                continue;
+            }
+
+            for (k = 0; k < n_changes; k++) {
+                if (changes[k].handle == c->handle && changes[k].time <= later) {
+                    at_later = &changes[k];
+                }
+            }
+
+            if (!at_later) {
+                continue;
+            }
+
+            sample_one(reader, c->handle, later, at_later);
+            sampled++;
+            break;
+        }
     }
 }
 
@@ -1452,6 +1857,224 @@ static void check_blackouts(fstReaderContext *reader)
     }
 }
 
+/*
+ * Everything the model recorded has to have been reported, except that
+ * QUIRK: once the dump size limit locks the writer the section being built is
+ * discarded, so the reader sees a prefix of what was written.  Sections do not
+ * straddle a time, so everything at or before the last reported time has to be
+ * there.  with_varlen is zero for the reader entry point that has nowhere to
+ * put a variable length change.
+ */
+static void check_all_reported(int with_varlen)
+{
+    unsigned int i;
+
+    if (changes_dropped) {
+        return;
+    }
+
+    for (i = 0; i < n_changes; i++) {
+        if (changes[i].delivered) {
+            continue;
+        }
+        if (!with_varlen && sigs[changes[i].handle - 1].kind == VK_STRING) {
+            continue;
+        }
+
+        CHECKF(limit_hit && (!have_cb_time || changes[i].time > last_cb_time),
+               "the change for handle %u at time %" PRIu64
+               " was written but never reported (last reported time %" PRIu64 ", dump size "
+               "limit %s)\n",
+               (unsigned)changes[i].handle,
+               changes[i].time,
+               have_cb_time ? last_cb_time : 0,
+               limit_hit ? "was reached" : "was not reached");
+    }
+}
+
+/*
+ * With native doubles turned on a real arrives as its eight raw bytes rather
+ * than as text.  Everything else is unchanged, so the ordinary callback
+ * handles it.
+ */
+static void native_double_cb(void *user,
+                             uint64_t time,
+                             fstHandle handle,
+                             const unsigned char *value)
+{
+    struct change *c;
+    int idx;
+
+    check_cb_common(time, handle);
+
+    if (changes_dropped) {
+        return;
+    }
+
+    if (sigs[handle - 1].kind != VK_REAL) {
+        value_cb(user, time, handle, value);
+        return;
+    }
+
+    idx = find_change(time, handle);
+    CHECKF(idx >= 0,
+           "the native double callback reported a change for handle %u at time %" PRIu64
+           " that was never written\n",
+           (unsigned)handle,
+           time);
+
+    c = &changes[idx];
+    c->delivered = 1;
+
+    CHECKF(memcmp(value, &c->d, sizeof(double)) == 0,
+           "real handle %u at time %" PRIu64 ": the native double bytes differ\n",
+           (unsigned)handle,
+           time);
+}
+
+static void reset_delivered(void)
+{
+    unsigned int i;
+
+    for (i = 0; i < n_changes; i++) {
+        changes[i].delivered = 0;
+    }
+    have_cb_time = 0;
+    last_cb_time = 0;
+}
+
+/* a real handed over as eight raw bytes rather than as text */
+static void check_native_doubles(fstReaderContext *reader)
+{
+    reset_delivered();
+
+    fstReaderIterBlocksSetNativeDoublesOnCallback(reader, 1);
+    fstReaderSetFacProcessMaskAll(reader);
+    CHECK(fstReaderIterBlocks2(reader, native_double_cb, varlen_cb, NULL, NULL) != 0);
+    fstReaderIterBlocksSetNativeDoublesOnCallback(reader, 0);
+
+    check_all_reported(1);
+}
+
+/*
+ * A handle that is not in the process mask must not be reported, and one that
+ * is must be reported in full.
+ */
+static void check_per_handle_mask(fstReaderContext *reader)
+{
+    unsigned int i;
+    fstHandle h;
+
+    if (n_sigs == 0) {
+        return;
+    }
+
+    fstReaderClrFacProcessMaskAll(reader);
+    for (h = 1; h <= n_sigs; h++) {
+        CHECKF(fstReaderGetFacProcessMask(reader, h) == 0,
+               "handle %u is still in the process mask after clearing all of it\n",
+               (unsigned)h);
+    }
+
+    /* keep the odd handles, drop the even ones */
+    for (h = 1; h <= n_sigs; h += 2) {
+        fstReaderSetFacProcessMask(reader, h);
+    }
+    for (h = 2; h <= n_sigs; h += 2) {
+        fstReaderClrFacProcessMask(reader, h);
+    }
+    for (h = 1; h <= n_sigs; h++) {
+        CHECKF(fstReaderGetFacProcessMask(reader, h) == ((h & 1) != 0),
+               "handle %u reads back as %d in the process mask, set it to %d\n",
+               (unsigned)h,
+               fstReaderGetFacProcessMask(reader, h),
+               (int)((h & 1) != 0));
+    }
+
+    reset_delivered();
+    CHECK(fstReaderIterBlocks2(reader, value_cb, varlen_cb, NULL, NULL) != 0);
+
+    if (!changes_dropped) {
+        for (i = 0; i < n_changes; i++) {
+            if ((changes[i].handle & 1) == 0) {
+                CHECKF(!changes[i].delivered,
+                       "handle %u was masked out but its change at time %" PRIu64
+                       " was reported anyway\n",
+                       (unsigned)changes[i].handle,
+                       changes[i].time);
+                changes[i].delivered = 1; /* so that check_all_reported() skips it */
+            }
+        }
+        check_all_reported(1);
+    }
+
+    fstReaderSetFacProcessMaskAll(reader);
+}
+
+/*
+ * A time range limit is honoured at section granularity, so there is no exact
+ * model for what it drops; the callbacks still verify that whatever arrives was
+ * really written.
+ */
+static void check_limit_time_range(fstReaderContext *reader)
+{
+    uint64_t lo = model_first_time;
+    uint64_t hi = model_cur_time;
+
+    reset_delivered();
+
+    if (hi > lo) {
+        lo += (hi - lo) / 4;
+        hi -= (hi - lo) / 4;
+    }
+
+    fstReaderSetLimitTimeRange(reader, lo, hi);
+    CHECK(fstReaderIterBlocks2(reader, value_cb, varlen_cb, NULL, NULL) != 0);
+    fstReaderSetUnlimitedTimeRange(reader);
+}
+
+/* the getters that carry no state of their own, called for their own sake */
+static void check_misc_getters(fstReaderContext *reader)
+{
+    fstReaderContext *utilities;
+
+    CHECK(fstReaderGetDoubleEndianMatchState(reader) == 1);
+    CHECK(fstReaderGetMemoryUsedByWriter(reader) > 0);
+    CHECK(fstReaderGetFseekFailed(reader) == 0);
+
+    /* one section per flush that had something to write, so never more than
+       the number of changes plus the one fstWriterClose() may add */
+    CHECKF(fstReaderGetValueChangeSectionCount(reader) <= (uint64_t)n_changes + 1,
+           "the file has %" PRIu64 " value change sections for %u changes\n",
+           fstReaderGetValueChangeSectionCount(reader),
+           n_changes);
+
+    utilities = fstReaderOpenForUtilitiesOnly();
+    CHECK(utilities != NULL);
+    fstReaderClose(utilities);
+}
+
+/*
+ * With a FILE * and no callbacks the reader writes the whole dump out as VCD.
+ * There is no model for the text, this is here to reach the code at all.
+ */
+static void check_vcd_output(fstReaderContext *reader)
+{
+    FILE *sink = tmpfile();
+
+    if (!sink) {
+        return;
+    }
+
+    fstReaderSetVcdExtensions(reader, (int)(tape_u8() & 1));
+    fstReaderSetFacProcessMaskAll(reader);
+
+    CHECK(fstReaderProcessHier(reader, sink) != 0);
+    CHECK(fstReaderIterBlocks2(reader, NULL, NULL, NULL, sink) != 0);
+
+    fclose(sink);
+}
+
 static void check_process_hier_keeps_mask(fstReaderContext *reader)
 {
     FILE *sink;
@@ -1486,43 +2109,42 @@ static void check_process_hier_keeps_mask(fstReaderContext *reader)
 static void verify(const char *path)
 {
     fstReaderContext *reader;
-    unsigned int i;
 
     reader = fstReaderOpen(path);
     CHECKF(reader != NULL, "fstReaderOpen() rejected a file this library wrote\n");
 
     check_header(reader);
-    check_hierarchy(reader);
+    check_hierarchy(reader, 1);
+
+    /* rewinding restarts the iterator, and has to yield the same records */
+    CHECK(fstReaderIterateHierRewind(reader) == 1);
+    check_hierarchy(reader, 0);
+
     check_blackouts(reader);
 
     fstReaderSetFacProcessMaskAll(reader);
     CHECK(fstReaderIterBlocks2(reader, value_cb, varlen_cb, NULL, NULL) != 0);
-
-    if (!changes_dropped) {
-        for (i = 0; i < n_changes; i++) {
-            if (changes[i].delivered) {
-                continue;
-            }
-
-            /*
-             * QUIRK: once the dump size limit locks the writer the section
-             * being built is discarded, so the reader sees a prefix of what
-             * was written.  Sections do not straddle a time, so everything at
-             * or before the last reported time has to be there.
-             */
-            CHECKF(limit_hit && (!have_cb_time || changes[i].time > last_cb_time),
-                   "the change for handle %u at time %" PRIu64
-                   " was written but never reported (last reported time %" PRIu64 ", dump size "
-                   "limit %s)\n",
-                   (unsigned)changes[i].handle,
-                   changes[i].time,
-                   have_cb_time ? last_cb_time : 0,
-                   limit_hit ? "was reached" : "was not reached");
-        }
-    }
+    check_all_reported(1);
 
     check_value_at_time(reader);
+
+    /*
+     * fstReaderIterBlocks() is fstReaderIterBlocks2() without the variable
+     * length callback, and with no callback and no VCD handle to fall back on
+     * a variable length change has nowhere to go, so it is dropped.  Every
+     * fixed length change still has to arrive.
+     */
+    reset_delivered();
+    CHECK(fstReaderIterBlocks(reader, value_cb, NULL, NULL) != 0);
+    check_all_reported(0);
+
+    check_native_doubles(reader);
+    check_per_handle_mask(reader);
+    check_limit_time_range(reader);
+    check_misc_getters(reader);
+
     check_process_hier_keeps_mask(reader);
+    check_vcd_output(reader);
 
     fstReaderClose(reader);
 }
@@ -1554,6 +2176,9 @@ static void reset(const uint8_t *data, size_t size)
     model_cur_time = 0;
     time_started = 0;
     limit_hit = 0;
+
+    memset(stem_paths_seen, 0, sizeof(stem_paths_seen));
+    n_stem_paths = 0;
 
     model_var_count = 0;
     model_scope_count = 0;
