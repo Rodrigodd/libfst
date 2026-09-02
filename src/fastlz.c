@@ -79,6 +79,17 @@
 #endif
 #endif
 
+/*
+ * The 16-bit accesses the exceptions above enable are unaligned, which is
+ * undefined behaviour whatever the hardware tolerates, so keep the portable
+ * 8-bit path everywhere: the sanitizer build reports every one of them, and it
+ * reports them from the middle of a compressor that is not the subject of the
+ * test that happened to reach it.
+ */
+#ifndef FASTLZ_STRICT_ALIGN
+#define FASTLZ_STRICT_ALIGN
+#endif
+
 /* prototypes */
 int fastlz_compress(const void* input, int length, void* output);
 int fastlz_compress_level(int level, const void* input, int length, void* output);
