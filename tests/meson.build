@@ -19,6 +19,7 @@ libfst_tests = [
     'word_aligned_vector_value_change',
     'process_hier_fac_mask',
     'real_value_from_frame',
+    'fastlz_pack_value_change',
 ]
 
 libfst_test_exes = []

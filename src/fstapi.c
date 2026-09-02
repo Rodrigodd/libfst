@@ -5500,19 +5500,21 @@ int fstReaderIterBlocks2(fstReaderContext *ctx,
                             mem_for_traversal + traversal_mem_offs; /* uncomp: dst */
                         unsigned char *mc; /* comp:   src */
                         unsigned long destlen = val;
-                        unsigned long sourcelen = chain_table_lengths[i];
+                        /* the chain length counts the length varint that was
+                           just read, the compressed data is what follows it */
+                        unsigned long sourcelen = chain_table_lengths[i] - skiplen;
 
                         if (traversal_mem_offs >= mem_required_for_traversal) {
                             chk_report_abort("TALOS-2023-1785");
                         }
 
-                        if (mc_mem_len < chain_table_lengths[i]) {
+                        if (mc_mem_len < sourcelen) {
                             free(mc_mem);
-                            mc_mem = (unsigned char *)malloc(mc_mem_len = chain_table_lengths[i]);
+                            mc_mem = (unsigned char *)malloc(mc_mem_len = sourcelen);
                         }
                         mc = mc_mem;
 
-                        fstFread(mc, chain_table_lengths[i], 1, xc->f);
+                        fstFread(mc, sourcelen, 1, xc->f);
 
                         switch (packtype) {
                             case '4':
@@ -6354,13 +6356,15 @@ process_value:
         fstReaderFseeko(xc, xc->f, xc->rvat_vc_start + xc->rvat_chain_table[facidx], SEEK_SET);
         xc->rvat_chain_len = fstReaderVarint32WithSkip(xc->f, &skiplen);
         if (xc->rvat_chain_len) {
+            /* the chain length counts the length varint that was just read,
+               the compressed data is what follows it */
+            unsigned long sourcelen = xc->rvat_chain_table_lengths[facidx] - skiplen;
             unsigned char *mu = (unsigned char *)malloc(xc->rvat_chain_len);
-            unsigned char *mc = (unsigned char *)malloc(xc->rvat_chain_table_lengths[facidx]);
+            unsigned char *mc = (unsigned char *)malloc(sourcelen);
             unsigned long destlen = xc->rvat_chain_len;
-            unsigned long sourcelen = xc->rvat_chain_table_lengths[facidx];
             int rc = Z_OK;
 
-            fstFread(mc, xc->rvat_chain_table_lengths[facidx], 1, xc->f);
+            fstFread(mc, sourcelen, 1, xc->f);
 
             switch (xc->rvat_packtype) {
                 case '4':
