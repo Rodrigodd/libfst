@@ -21,6 +21,7 @@ libfst_tests = [
     'real_value_from_frame',
     'fastlz_pack_value_change',
     'value_change_handle_zero',
+    'mask_no_variables',
 ]
 
 libfst_test_exes = []

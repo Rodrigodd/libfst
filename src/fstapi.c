@@ -3560,14 +3560,14 @@ void fstReaderClrFacProcessMask(fstReaderContext *xc, fstHandle facidx)
 
 void fstReaderSetFacProcessMaskAll(fstReaderContext *xc)
 {
-    if (xc) {
+    if (xc && xc->process_mask) {
         memset(xc->process_mask, 0xff, (xc->maxhandle + 7) / 8);
     }
 }
 
 void fstReaderClrFacProcessMaskAll(fstReaderContext *xc)
 {
-    if (xc) {
+    if (xc && xc->process_mask) {
         memset(xc->process_mask, 0x00, (xc->maxhandle + 7) / 8);
     }
 }
