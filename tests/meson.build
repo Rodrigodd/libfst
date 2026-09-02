@@ -22,6 +22,7 @@ libfst_tests = [
     'fastlz_pack_value_change',
     'value_change_handle_zero',
     'mask_no_variables',
+    'rvat_chain_table',
 ]
 
 libfst_test_exes = []
